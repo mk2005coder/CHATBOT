@@ -20,7 +20,11 @@ st.markdown(f"""
     [data-testid="stSidebar"] {{ background-color: #2D2D2D; }}
     
     /* 3. Màu chữ trong Sidebar (Trắng) */
-    [data-testid="stSidebar"] .stMarkdown p, [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] div {{
+    [data-testid="stSidebar"] .stMarkdown p, 
+    [data-testid="stSidebar"] h1, 
+    [data-testid="stSidebar"] h2, 
+    [data-testid="stSidebar"] div,
+    [data-testid="stSidebar"] label {{
         color: white !important;
     }}
     
@@ -53,7 +57,7 @@ def get_chroma_collection():
         
     client = chromadb.PersistentClient(path="nabin_db_data")
     
-    # Dùng model embedding nhẹ
+    # Dùng model embedding nhẹ để tìm kiếm
     emb_func = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name="paraphrase-multilingual-MiniLM-L12-v2"
     )
@@ -73,7 +77,7 @@ def index_data():
         if os.path.exists("drink.json"):
             with open("drink.json", "r", encoding="utf-8") as f: data += json.load(f)
             
-        if not data: return 0, "Không tìm thấy file json!"
+        if not data: return 0, "Không tìm thấy file json (food.json hoặc drink.json)!"
 
         ids = []
         documents = []
@@ -92,7 +96,7 @@ def index_data():
                 "map": item.get("map_link", "https://maps.google.com")
             })
 
-        # Thêm vào DB
+        # Thêm vào DB (upsert: cập nhật nếu đã có, thêm mới nếu chưa)
         collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
         return len(data), "Thành công"
     except Exception as e:
@@ -164,11 +168,15 @@ with col1:
                     genai.configure(api_key=api_key)
                     
                     # Tìm kiếm trong ChromaDB
-                    results = collection.query(query_texts=[prompt], n_results=3)
+                    try:
+                        results = collection.query(query_texts=[prompt], n_results=3)
+                    except Exception as e:
+                        st.error(f"Lỗi tìm kiếm DB: {e}")
+                        results = None
                     
                     # Ghép context
                     context_text = ""
-                    if results['documents'] and results['documents'][0]:
+                    if results and results['documents'] and results['documents'][0]:
                         context_text = "\n".join(results['documents'][0])
                         # Lưu kết quả tìm kiếm để hiển thị bên Cột 2
                         st.session_state.last_results = results
@@ -183,11 +191,4 @@ with col1:
                     {context_text}
                     
                     Yêu cầu:
-                    - Trả lời giọng điệu cute, quan tâm (gọi là 'anh', xưng 'em' hoặc 'Nabin').
-                    - Nếu tìm thấy quán, hãy tóm tắt tại sao quán đó phù hợp.
-                    - Nếu không thấy quán phù hợp trong danh sách, hãy gợi ý dựa trên kiến thức chung nhưng nói rõ là "Em không thấy trong danh sách quán quen, nhưng em biết chỗ này...".
-                    """
-                    
-                    try:
-                        model = genai
-                        
+                    - Trả lời giọng điệu cute, quan tâm (gọi là '
