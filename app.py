@@ -1,122 +1,193 @@
 import streamlit as st
-import json
-import os
 import chromadb
 from chromadb.utils import embedding_functions
 import google.generativeai as genai
+import json
+import os
 
 # ==========================================
-# 1. CẤU HÌNH HỆ THỐNG
+# 1. CẤU HÌNH & GIAO DIỆN (THEME NAVY-GREY)
 # ==========================================
-st.set_page_config(page_title="Hỗ trợ Hộ chiếu VN", page_icon="🇻🇳", layout="wide")
+st.set_page_config(page_title="NABIN AI", layout="wide", page_icon="💖")
 
-if "GOOGLE_API_KEY" in st.secrets:
-    api_key = st.secrets["GOOGLE_API_KEY"]
-    genai.configure(api_key=api_key)
-else:
-    st.error("❌ Thiếu API Key trong Secrets!")
-    st.stop()
+# --- CSS TÙY CHỈNH: NAVY - GREY THEME ---
+st.markdown(f"""
+    <style>
+    /* 1. Màu nền chính (Xám nhạt) */
+    .stApp {{ background-color: #F0F2F6; }}
+    
+    /* 2. Màu nền Sidebar (Xám đậm) */
+    [data-testid="stSidebar"] {{ background-color: #2D2D2D; }}
+    
+    /* 3. Màu chữ trong Sidebar (Trắng) */
+    [data-testid="stSidebar"] .stMarkdown p, [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] div {{
+        color: white !important;
+    }}
+    
+    /* 4. Tiêu đề chính (Xanh Navy) */
+    h1 span {{ color: #001F3F; font-weight: 800; }}
+    h3 {{ color: #001F3F; }}
+    
+    /* 5. Tùy chỉnh bong bóng chat */
+    .stChatMessage {{ background-color: transparent; }}
+    
+    /* 6. Tùy chỉnh nút Link (Map) */
+    a[href] {{
+        text-decoration: none;
+        color: #001F3F !important;
+        font-weight: bold;
+    }}
+    </style>
+    """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. KHỞI TẠO DỮ LIỆU (RAG)
+# 2. XỬ LÝ DỮ LIỆU & AI
 # ==========================================
+
+# --- A. Xử lý ChromaDB (Lưu trữ vĩnh viễn) ---
 @st.cache_resource
-def init_db():
-    if not os.path.exists("TAI_LIEU_RB.json"):
-        return None
-    client = chromadb.PersistentClient(path="chroma_db_data")
+def get_chroma_collection():
+    # Tạo thư mục lưu DB để không phải index lại mỗi lần reload
+    if not os.path.exists("nabin_db_data"):
+        os.makedirs("nabin_db_data")
+        
+    client = chromadb.PersistentClient(path="nabin_db_data")
+    
+    # Dùng model embedding nhẹ
     emb_func = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name="paraphrase-multilingual-MiniLM-L12-v2"
     )
-    try:
-        # Sử dụng collection mới để làm sạch dữ liệu
-        collection = client.get_or_create_collection(name="passport_stable_v1", embedding_function=emb_func)
-        if collection.count() == 0:
-            with open("TAI_LIEU_RB.json", "r", encoding="utf-8") as f:
-                data = json.load(f)
-            documents = [item["content_text"] for item in data]
-            metadatas = [{"title": item["title"], "url": item["url"]} for item in data]
-            ids = [str(i) for i in range(len(data))]
-            collection.add(ids=ids, documents=documents, metadatas=metadatas)
-    except Exception as e:
-        st.error(f"Lỗi DB: {e}")
-        return None
+    
+    collection = client.get_or_create_collection(name="nabin_places", embedding_function=emb_func)
     return collection
 
-collection = init_db()
+collection = get_chroma_collection()
 
-# ==========================================
-# 3. HÀM TÌM MODEL KHẢ DỤNG (SỬA LỖI 404)
-# ==========================================
-def get_available_model():
+# --- B. Hàm nạp dữ liệu ---
+def index_data():
     try:
-        # Liệt kê các model mà Key này có quyền sử dụng
-        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # Ưu tiên bản Flash 1.5 (ổn định và quota cao nhất)
-        for m in models:
-            if "1.5-flash" in m:
-                return m
-        # Nếu không thấy Flash, lấy bất kỳ model nào có sẵn (Pro, v.v.)
-        return models[0] if models else "models/gemini-1.5-flash"
-    except Exception:
-        # Nếu lỗi list_models, trả về tên phổ biến nhất
-        return "models/gemini-1.5-flash"
+        data = []
+        # Kiểm tra file tồn tại không để tránh lỗi
+        if os.path.exists("food.json"):
+            with open("food.json", "r", encoding="utf-8") as f: data += json.load(f)
+        if os.path.exists("drink.json"):
+            with open("drink.json", "r", encoding="utf-8") as f: data += json.load(f)
+            
+        if not data: return 0, "Không tìm thấy file json!"
 
-# ==========================================
-# 4. XỬ LÝ AI
-# ==========================================
-def get_ai_response(user_query):
-    if collection is None: return "Dữ liệu chưa sẵn sàng.", None, None, None
+        ids = []
+        documents = []
+        metadatas = []
 
-    # Lấy 1 đoạn thông tin liên quan nhất để tiết kiệm Token
-    results = collection.query(query_texts=[user_query], n_results=1)
-    if not results["documents"][0]:
-        return "Không tìm thấy thông tin phù hợp.", None, None, None
+        for i, item in enumerate(data):
+            # Tạo nội dung text để AI đọc
+            content = f"Tên quán: {item['name']}. Địa chỉ: {item['address']}. Mood/Không gian: {item.get('mood', 'Không rõ')}. Ghi chú món: {item.get('notes', '')}"
+            
+            ids.append(f"place_{i}")
+            documents.append(content)
+            # Lưu link map vào metadata để truy xuất sau
+            metadatas.append({
+                "name": item['name'],
+                "address": item['address'],
+                "map": item.get("map_link", "https://maps.google.com")
+            })
 
-    context = results["documents"][0][0]
-    meta = results["metadatas"][0][0]
-    
-    prompt = f"Ngữ cảnh: {context}\n\nCâu hỏi: {user_query}\nTrả lời ngắn gọn, chính xác."
-
-    try:
-        model_name = get_available_model()
-        model = genai.GenerativeModel(model_name)
-        response = model.generate_content(prompt)
-        return response.text, meta['url'], meta['title'], model_name
+        # Thêm vào DB
+        collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
+        return len(data), "Thành công"
     except Exception as e:
-        return str(e), None, None, None
+        return 0, str(e)
 
 # ==========================================
-# 5. GIAO DIỆN CHAT
+# 3. SIDEBAR (CÀI ĐẶT)
 # ==========================================
-st.title("🇻🇳 Trợ lý ảo Hộ chiếu")
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-user_input = st.chat_input("Nhập câu hỏi về hộ chiếu...")
-
-if user_input:
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    with st.chat_message("user"):
-        st.markdown(user_input)
-
-    with st.chat_message("assistant"):
-        with st.spinner("Đang kết nối..."):
-            answer, url, title, m_used = get_ai_response(user_input)
-            
-            if "429" in answer:
-                full_res = "⚠️ Hệ thống đang hết lượt dùng miễn phí. Vui lòng chờ 60 giây."
-            elif url:
-                full_res = f"{answer}\n\n---\n**Nguồn:** {title}\n🔗 [Link Dịch vụ công]({url})"
+with st.sidebar:
+    st.title("⚙️ Cài đặt NABIN")
+    st.markdown("---")
+    
+    # Ưu tiên lấy API Key từ Secrets, nếu không có thì hiện ô nhập
+    if "GOOGLE_API_KEY" in st.secrets:
+        api_key = st.secrets["GOOGLE_API_KEY"]
+        st.success("✅ Đã kết nối API Key từ hệ thống")
+    else:
+        api_key = st.text_input("Nhập Gemini API Key", type="password")
+    
+    st.markdown("---")
+    if st.button("🔄 Nạp dữ liệu Quán (Re-index)"):
+        with st.spinner("Đang học dữ liệu mới..."):
+            count, msg = index_data()
+            if count > 0:
+                st.success(f"Đã nạp {count} địa điểm!")
             else:
-                full_res = answer
-            
-            st.markdown(full_res)
-            if m_used: st.caption(f"Đã sử dụng model: {m_used}")
-            st.session_state.messages.append({"role": "assistant", "content": full_res})
+                st.error(f"Lỗi: {msg}")
+
+    if st.button("🗑️ Xóa lịch sử chat"):
+        st.session_state.messages = []
+        st.session_state.pop('last_results', None)
+        st.rerun()
+
+# ==========================================
+# 4. GIAO DIỆN CHÍNH (2 CỘT)
+# ==========================================
+st.title("💖 NABIN - Trợ lý của Thanh Huy")
+
+col1, col2 = st.columns([2, 1])
+
+# --- CỘT 1: CHATBOT ---
+with col1:
+    st.subheader("💬 Trò chuyện")
+    
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            {"role": "assistant", "content": "Hé lô Thanh Huy! Hôm nay anh muốn đi ăn hay đi uống nước nè? 💖"}
+        ]
+
+    # Hiển thị lịch sử
+    for msg in st.session_state.messages:
+        avatar = "🦸‍♂️" if msg["role"] == "user" else "🧚‍♀️"
+        with st.chat_message(msg["role"], avatar=avatar):
+            st.markdown(msg["content"])
+
+    # Xử lý nhập liệu
+    if prompt := st.chat_input("Gõ vào đây nha... (ví dụ: Tìm quán cafe yên tĩnh làm việc)"):
+        if not api_key:
+            st.warning("Vui lòng nhập API Key ở Sidebar trước nha!")
+        else:
+            # 1. Hiển thị User Message
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user", avatar="🦸‍♂️"):
+                st.markdown(prompt)
+
+            # 2. Xử lý RAG + AI
+            with st.chat_message("assistant", avatar="🧚‍♀️"):
+                with st.spinner("Nabin đang suy nghĩ..."):
+                    genai.configure(api_key=api_key)
+                    
+                    # Tìm kiếm trong ChromaDB
+                    results = collection.query(query_texts=[prompt], n_results=3)
+                    
+                    # Ghép context
+                    context_text = ""
+                    if results['documents'] and results['documents'][0]:
+                        context_text = "\n".join(results['documents'][0])
+                        # Lưu kết quả tìm kiếm để hiển thị bên Cột 2
+                        st.session_state.last_results = results
+                    else:
+                        st.session_state.last_results = None
+
+                    # Prompt cho Gemini
+                    sys_instruction = f"""Bạn là NABIN, trợ lý người yêu ảo cực kỳ dễ thương của Thanh Huy.
+                    Nhiệm vụ: Tư vấn địa điểm ăn uống dựa trên danh sách sau đây.
+                    
+                    Danh sách quán tìm được:
+                    {context_text}
+                    
+                    Yêu cầu:
+                    - Trả lời giọng điệu cute, quan tâm (gọi là 'anh', xưng 'em' hoặc 'Nabin').
+                    - Nếu tìm thấy quán, hãy tóm tắt tại sao quán đó phù hợp.
+                    - Nếu không thấy quán phù hợp trong danh sách, hãy gợi ý dựa trên kiến thức chung nhưng nói rõ là "Em không thấy trong danh sách quán quen, nhưng em biết chỗ này...".
+                    """
+                    
+                    try:
+                        model = genai
+                        
